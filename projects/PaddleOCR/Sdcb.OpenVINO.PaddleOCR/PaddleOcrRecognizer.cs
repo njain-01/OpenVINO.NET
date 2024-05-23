@@ -2,6 +2,8 @@
 using Sdcb.OpenVINO.Extensions.OpenCvSharp4;
 using Sdcb.OpenVINO.PaddleOCR.Models;
 using System;
+using System.Collections;
+using System.IO;
 using System.Linq;
 using System.Text;
 
@@ -224,6 +226,18 @@ public class PaddleOcrRecognizer : IDisposable
                     return ResizePadding(channel3, modelHeight, maxWidth);
                 })
                 .ToArray();
+            var directoryPath = "C:\\Users\\NamanJain\\source\\repos\\DA-CV-Dataset\\Data\\Channels\\SAP\\sap-new\\paddlesharp-rec-norm\\";
+            int existingFileCount = Directory.GetFiles(directoryPath, "*.png").Length;
+
+            // Loop through the array of Mats and save them as PNG images
+            //for (int i = 0; i < normalizeds.Length; i++)
+            //{
+            //    string fileName = $"{directoryPath}{existingFileCount + i}.png";
+            //    Mat norm = new();
+            //    normalizeds[i].ConvertTo(norm, MatType.CV_32FC3, 2.0 / 255, -1.0);
+            //    norm.SaveImage(fileName);
+            //    Console.WriteLine($"Saved image {existingFileCount + i}: {fileName}");
+            //}
             using Mat combined = normalizeds.StackingVertically();
             combined.ConvertTo(final, MatType.CV_32FC3, 2.0 / 255, -1.0);
         }
@@ -255,7 +269,7 @@ public class PaddleOcrRecognizer : IDisposable
             Mat result = new();
             int padTop = padH / 2;
             int padBottom = padH - padTop;
-            Cv2.CopyMakeBorder(resized, result, padTop, padBottom, 0, padRight, BorderTypes.Constant, Scalar.Black);
+            Cv2.CopyMakeBorder(resized, result, padTop, padBottom, 0, padRight, BorderTypes.Constant, Scalar.Gray);
             resized.Dispose();
             return result;
         }

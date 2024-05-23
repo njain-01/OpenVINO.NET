@@ -1,8 +1,11 @@
-﻿using OpenCvSharp;
-using Sdcb.OpenVINO.PaddleOCR.Models;
+﻿using Clipper2Lib;
+using OpenCvSharp;
 using Sdcb.OpenVINO.Extensions.OpenCvSharp4;
+using Sdcb.OpenVINO.PaddleOCR.Models;
 using System;
+using System.Collections.Generic;
 using System.Linq;
+using System.Net;
 using System.Runtime.CompilerServices;
 
 namespace Sdcb.OpenVINO.PaddleOCR;
@@ -35,7 +38,7 @@ public class PaddleOcrDetector : IDisposable
     public int? DilatedSize { get; set; } = 2;
 
     /// <summary>Gets or sets the score threshold for filtering out possible text boxes.</summary>
-    public float? BoxScoreThreahold { get; set; } = 0.7f;
+    public float? BoxScoreThreahold { get; set; } = 0.6f;
 
     /// <summary>Gets or sets the threshold to binarize the text region.</summary>
     public float? BoxThreshold { get; set; } = 0.3f;
@@ -134,17 +137,10 @@ public class PaddleOcrDetector : IDisposable
         return clone;
     }
 
-    /// <summary>
-    /// Runs the text box detection process on the input image.
-    /// </summary>
-    /// <param name="src">Input image.</param>
-    /// <returns>An array of detected rotated rectangles representing text boxes.</returns>
-    /// <exception cref="ArgumentException">Thrown when input image is empty.</exception>
-    /// <exception cref="NotSupportedException">Thrown when input image channels are not 3 or 1.</exception>
-    /// <exception cref="Exception">Thrown when PaddlePredictor run fails.</exception>
-    public RotatedRect[] Run(Mat src)
+    public List<Point2f[]> RunNew(Mat src)
     {
         using Mat pred = RunRaw(src, out Size resizedSize);
+        //pred.SaveImage("C:\\Users\\NamanJain\\CV 4.20.0\\accuracy-gap\\csharp-det-pred.png");
         using Mat cbuf = new();
         {
             using Mat roi = pred[0, resizedSize.Height, 0, resizedSize.Width];
@@ -168,25 +164,339 @@ public class PaddleOcrDetector : IDisposable
         }
 
         Point[][] contours = dilated.FindContoursAsArray(RetrievalModes.List, ContourApproximationModes.ApproxSimple);
+        //// Serialize the sorted array to JSON
+        //var json = JsonConvert.SerializeObject(contours, Newtonsoft.Json.Formatting.Indented);
+
+        //// Write the JSON string to a file
+        //File.WriteAllText("C:\\Users\\NamanJain\\CV 4.20.0\\accuracy-gap\\csharp-contours.json", json);
         Size size = src.Size();
         double scaleRate = 1.0 * src.Width / resizedSize.Width;
 
-        RotatedRect[] rects = contours
-            .Where(x => BoxScoreThreahold == null || GetScore(x, pred) > BoxScoreThreahold)
-            .Select(x => Cv2.MinAreaRect(x))
-            .Where(x => x.Size.Width > MinSize && x.Size.Height > MinSize)
-            .Select(rect =>
+        //RotatedRect[] rects = contours
+        //    .Where(x => BoxScoreThreahold == null || GetScore(x, pred) > BoxScoreThreahold)
+        //    .Select(x => Cv2.MinAreaRect(x))
+        //    .Where(x => x.Size.Width > MinSize && x.Size.Height > MinSize)
+        //    .Select(rect =>
+        //    {
+        //        float minEdge = Math.Min(rect.Size.Width, rect.Size.Height);
+        //        Size2f newSize = new(
+        //            (rect.Size.Width + UnclipRatio * minEdge) * scaleRate,
+        //            (rect.Size.Height + UnclipRatio * minEdge) * scaleRate);
+        //        RotatedRect largerRect = new(rect.Center * scaleRate, newSize, rect.Angle);
+        //        return largerRect;
+        //    })
+        //    .OrderBy(v => v.Center.Y)
+        //    .ThenBy(v => v.Center.X)
+        //    .ToArray();
+
+        List<RotatedRect> filteredRects = new List<RotatedRect>();
+        List<Point2f[]> point2Fs = new();
+        List<float> scores = new();
+        List<RotatedRect> conts = new();
+        List<int> rejectedConts = new();
+        int ind = 0;
+        List<string> scoresList = new();
+        foreach (var contour in contours)
+        {
+            try
             {
-                float minEdge = Math.Min(rect.Size.Width, rect.Size.Height);
-                Size2f newSize = new(
-                    (rect.Size.Width + UnclipRatio * minEdge) * scaleRate,
-                    (rect.Size.Height + UnclipRatio * minEdge) * scaleRate);
-                RotatedRect largerRect = new(rect.Center * scaleRate, newSize, rect.Angle);
-                return largerRect;
-            })
-            .OrderBy(v => v.Center.Y)
-            .ThenBy(v => v.Center.X)
-            .ToArray();
+                var score = GetScore(contour, pred);
+                if (BoxScoreThreahold == null || score > BoxScoreThreahold)
+                {
+
+                    // Get the minimum area rectangle
+                    //RotatedRect rect = Cv2.MinAreaRect(contour);
+                    var (bpoints, sside) = GetMiniBoxes(contour);
+
+                    // Check if the rect size meets the minimum size criteria
+                    if (!(sside < MinSize))
+                    {
+                        //Console.WriteLine(ind);
+                        var points = Unclip(bpoints, UnclipRatio);
+                        var (expbpoints, ssideExp) = GetMiniBoxes(points);
+                        if (ssideExp < MinSize + 2)
+                            continue;
+                        TransformPoints(expbpoints, resizedSize.Width, resizedSize.Height, src.Width, src.Height);
+                        try
+                        {
+                            //var largerRect = RotatedRect.FromThreeVertexPoints(expbpoints[0], expbpoints[1], expbpoints[2]);
+                            //filteredRects.Add(largerRect);
+
+                            point2Fs.Add(expbpoints);
+                        }
+                        catch (Exception e)
+                        {
+                            Console.WriteLine(e.Message);
+                            //GetRotateCropImage(src, expbpoints).SaveImage($"C:\\Users\\NamanJain\\CV 4.20.0\\accuracy-gap\\csharp-ov-det-imgs\\{ind}.png");
+                        }
+                    }
+                    else
+                    {
+                        rejectedConts.Add(ind);
+                    }
+                }
+                else
+                {
+                    rejectedConts.Add(ind);
+                }
+                ind++;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("Error");
+            }
+        }
+        // First filtering based on BoxScoreThreahold
+        //foreach (var contour in contours)
+        //{
+        //    var score = GetScore(contour, pred);
+        //    RotatedRect rect2 = Cv2.MinAreaRect(contour);
+        //    //scoresList.Add($"{ind}-->{score.ToString().Substring(0,5)}");
+        //    conts.Add(rect2);
+        //    if (BoxScoreThreahold == null || score > BoxScoreThreahold)
+        //    {
+
+        //        // Get the minimum area rectangle
+        //        RotatedRect rect = Cv2.MinAreaRect(contour);
+        //        var (bpoints, sside) = GetMiniBoxes(contour);
+        //        //Cv2.BoxPoints()
+        //        //conts.Add(rect);
+
+        //        // Check if the rect size meets the minimum size criteria
+        //        if (!(sside<MinSize))
+        //        {
+        //            scores.Add(score);
+        //            // Calculate the new size
+        //            float minEdge = Math.Min(rect.Size.Width, rect.Size.Height);
+        //            Size2f newSize = new Size2f(
+        //                (rect.Size.Width + UnclipRatio * minEdge) * scaleRate,
+        //                (rect.Size.Height + UnclipRatio * minEdge) * scaleRate
+        //            );
+
+        //            // Create a larger rect with the new size
+        //            RotatedRect largerRect = new RotatedRect(rect.Center * scaleRate, newSize, rect.Angle);
+        //            var rectt = largerRect.BoundingRect();
+
+        //            // Add the larger rect to the filtered list
+        //            filteredRects.Add(largerRect);
+        //        }
+        //        else
+        //        {
+        //            rejectedConts.Add(ind);
+        //        }
+        //    }
+        //    else
+        //    {
+        //        rejectedConts.Add(ind);
+        //    }
+        //    ind++;
+        //}
+        //Console.WriteLine($"Rejected conts {rejectedConts.Count}: {string.Join(" ", rejectedConts)}");
+        //Console.WriteLine($"{string.Join("\n", scoresList)}");
+        //var sortedRotatedRects = conts.OrderBy(r => r.Center.X).ToArray();
+
+        //// Serialize the sorted array to JSON
+        //var json = JsonConvert.SerializeObject(sortedRotatedRects, Newtonsoft.Json.Formatting.Indented);
+
+        //// Write the JSON string to a file
+        //File.WriteAllText("C:\\Users\\NamanJain\\CV 4.20.0\\accuracy-gap\\csharp-rects.json", json);
+
+
+        //{
+        //	using Mat demo = dilated.CvtColor(ColorConversionCodes.GRAY2RGB);
+        //	demo.DrawContours(contours, -1, Scalar.Red);
+        //	Image(demo).Dump();
+        //}
+        return point2Fs;
+    }
+
+
+
+    /// <summary>
+    /// Runs the text box detection process on the input image.
+    /// </summary>
+    /// <param name="src">Input image.</param>
+    /// <returns>An array of detected rotated rectangles representing text boxes.</returns>
+    /// <exception cref="ArgumentException">Thrown when input image is empty.</exception>
+    /// <exception cref="NotSupportedException">Thrown when input image channels are not 3 or 1.</exception>
+    /// <exception cref="Exception">Thrown when PaddlePredictor run fails.</exception>
+    public RotatedRect[] Run(Mat src)
+    {
+        using Mat pred = RunRaw(src, out Size resizedSize);
+        //pred.SaveImage("C:\\Users\\NamanJain\\CV 4.20.0\\accuracy-gap\\csharp-det-pred.png");
+        using Mat cbuf = new();
+        {
+            using Mat roi = pred[0, resizedSize.Height, 0, resizedSize.Width];
+            roi.ConvertTo(cbuf, MatType.CV_8UC1, 255);
+        }
+        using Mat dilated = new();
+        {
+            using Mat binary = BoxThreshold != null ?
+                cbuf.Threshold((int)(BoxThreshold * 255), 255, ThresholdTypes.Binary) :
+                cbuf;
+
+            if (DilatedSize != null)
+            {
+                using Mat ones = Cv2.GetStructuringElement(MorphShapes.Rect, new Size(DilatedSize.Value, DilatedSize.Value));
+                Cv2.Dilate(binary, dilated, ones);
+            }
+            else
+            {
+                Cv2.CopyTo(binary, dilated);
+            }
+        }
+
+        Point[][] contours = dilated.FindContoursAsArray(RetrievalModes.List, ContourApproximationModes.ApproxSimple);
+        //// Serialize the sorted array to JSON
+        //var json = JsonConvert.SerializeObject(contours, Newtonsoft.Json.Formatting.Indented);
+
+        //// Write the JSON string to a file
+        //File.WriteAllText("C:\\Users\\NamanJain\\CV 4.20.0\\accuracy-gap\\csharp-contours.json", json);
+        Size size = src.Size();
+        double scaleRate = 1.0 * src.Width / resizedSize.Width;
+
+        //RotatedRect[] rects = contours
+        //    .Where(x => BoxScoreThreahold == null || GetScore(x, pred) > BoxScoreThreahold)
+        //    .Select(x => Cv2.MinAreaRect(x))
+        //    .Where(x => x.Size.Width > MinSize && x.Size.Height > MinSize)
+        //    .Select(rect =>
+        //    {
+        //        float minEdge = Math.Min(rect.Size.Width, rect.Size.Height);
+        //        Size2f newSize = new(
+        //            (rect.Size.Width + UnclipRatio * minEdge) * scaleRate,
+        //            (rect.Size.Height + UnclipRatio * minEdge) * scaleRate);
+        //        RotatedRect largerRect = new(rect.Center * scaleRate, newSize, rect.Angle);
+        //        return largerRect;
+        //    })
+        //    .OrderBy(v => v.Center.Y)
+        //    .ThenBy(v => v.Center.X)
+        //    .ToArray();
+
+        List<RotatedRect> filteredRects = new List<RotatedRect>();
+        List<float> scores = new();
+        List<RotatedRect> conts = new();
+        List<int> rejectedConts = new();
+        int ind = 0;
+        List<string> scoresList = new();
+        foreach (var contour in contours)
+        {
+            try
+            {
+                var score = GetScore(contour, pred);
+                if (BoxScoreThreahold == null || score > BoxScoreThreahold)
+                {
+
+                    // Get the minimum area rectangle
+                    //RotatedRect rect = Cv2.MinAreaRect(contour);
+                    var (bpoints, sside) = GetMiniBoxes(contour);
+
+                    // Check if the rect size meets the minimum size criteria
+                    if (!(sside < MinSize))
+                    {
+                        Console.WriteLine(ind);
+                        var points = Unclip(bpoints, UnclipRatio);
+                        var (expbpoints, ssideExp) = GetMiniBoxes(points);
+                        if (ssideExp < MinSize + 2)
+                            continue;
+                        TransformPoints(expbpoints, resizedSize.Width, resizedSize.Height, src.Width, src.Height);
+                        try
+                        {
+                            var largerRect = RotatedRect.FromThreeVertexPoints(expbpoints[0], expbpoints[1], expbpoints[2]);
+                            filteredRects.Add(largerRect);
+                        }
+                        catch (Exception e)
+                        {
+                            Console.WriteLine(e.Message);
+                            Console.WriteLine(e.HelpLink);
+                            Console.WriteLine(e.StackTrace);
+                            GetRotateCropImage(src, expbpoints).SaveImage($"C:\\Users\\NamanJain\\CV 4.20.0\\accuracy-gap\\csharp-ov-det-imgs\\{ind}.png");
+                        }
+                    }
+                    else
+                    {
+                        rejectedConts.Add(ind);
+                    }
+                }
+                else
+                {
+                    rejectedConts.Add(ind);
+                }
+                ind++;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("Error");
+            }
+        }
+        // First filtering based on BoxScoreThreahold
+        //foreach (var contour in contours)
+        //{
+        //    var score = GetScore(contour, pred);
+        //    RotatedRect rect2 = Cv2.MinAreaRect(contour);
+        //    //scoresList.Add($"{ind}-->{score.ToString().Substring(0,5)}");
+        //    conts.Add(rect2);
+        //    if (BoxScoreThreahold == null || score > BoxScoreThreahold)
+        //    {
+
+        //        // Get the minimum area rectangle
+        //        RotatedRect rect = Cv2.MinAreaRect(contour);
+        //        var (bpoints, sside) = GetMiniBoxes(contour);
+        //        //Cv2.BoxPoints()
+        //        //conts.Add(rect);
+
+        //        // Check if the rect size meets the minimum size criteria
+        //        if (!(sside<MinSize))
+        //        {
+        //            scores.Add(score);
+        //            // Calculate the new size
+        //            float minEdge = Math.Min(rect.Size.Width, rect.Size.Height);
+        //            Size2f newSize = new Size2f(
+        //                (rect.Size.Width + UnclipRatio * minEdge) * scaleRate,
+        //                (rect.Size.Height + UnclipRatio * minEdge) * scaleRate
+        //            );
+
+        //            // Create a larger rect with the new size
+        //            RotatedRect largerRect = new RotatedRect(rect.Center * scaleRate, newSize, rect.Angle);
+        //            var rectt = largerRect.BoundingRect();
+
+        //            // Add the larger rect to the filtered list
+        //            filteredRects.Add(largerRect);
+        //        }
+        //        else
+        //        {
+        //            rejectedConts.Add(ind);
+        //        }
+        //    }
+        //    else
+        //    {
+        //        rejectedConts.Add(ind);
+        //    }
+        //    ind++;
+        //}
+        //Console.WriteLine($"Rejected conts {rejectedConts.Count}: {string.Join(" ", rejectedConts)}");
+        //Console.WriteLine($"{string.Join("\n", scoresList)}");
+        //var sortedRotatedRects = conts.OrderBy(r => r.Center.X).ToArray();
+
+        //// Serialize the sorted array to JSON
+        //var json = JsonConvert.SerializeObject(sortedRotatedRects, Newtonsoft.Json.Formatting.Indented);
+
+        //// Write the JSON string to a file
+        //File.WriteAllText("C:\\Users\\NamanJain\\CV 4.20.0\\accuracy-gap\\csharp-rects.json", json);
+
+        // Sorting the filtered rectangles
+        filteredRects.Sort((a, b) =>
+        {
+            int compareY = a.Center.Y.CompareTo(b.Center.Y);
+            if (compareY != 0)
+            {
+                return compareY;
+            }
+            return a.Center.X.CompareTo(b.Center.X);
+        });
+
+        // Convert the list to an array
+        RotatedRect[] rects = filteredRects.ToArray();
+
         //{
         //	using Mat demo = dilated.CvtColor(ColorConversionCodes.GRAY2RGB);
         //	demo.DrawContours(contours, -1, Scalar.Red);
@@ -219,6 +529,8 @@ public class PaddleOcrDetector : IDisposable
             using Mat resized = MatResize(src, MaxSize);
             resizedSize = new Size(resized.Width, resized.Height);
             padded = MatPadding32(resized);
+            //padded = resized.FastClone();
+            //padded.SaveImage("C:\\Users\\NamanJain\\CV 4.20.0\\accuracy-gap\\resized_csharp_det.png");
         }
         else
         {
@@ -231,6 +543,7 @@ public class PaddleOcrDetector : IDisposable
         using (Mat _ = padded)
         {
             normalized = Normalize(padded);
+            //normalized.SaveImage("C:\\Users\\NamanJain\\CV 4.20.0\\accuracy-gap\\csharp-det-norm.png");
         }
 
         using InferRequest ir = _compiledModel.CreateInferRequest();
@@ -248,6 +561,182 @@ public class PaddleOcrDetector : IDisposable
 
             return new Mat(shape.Height, shape.Width, MatType.CV_32FC1, data.ToArray());
         }
+    }
+
+    Mat GetRotateCropImage(Mat img, Point2f[] points)
+    {
+        // Compute width and height of the rotated rectangle using Euclidean distance
+        int imgCropWidth = (int)Math.Max(
+            Distance(points[0], points[1]),
+            Distance(points[2], points[3])
+        );
+        int imgCropHeight = (int)Math.Max(
+            Distance(points[0], points[3]),
+            Distance(points[1], points[2])
+        );
+
+        // Destination points for perspective transform
+        Point2f[] ptsStd = new Point2f[]
+        {
+            new Point2f(0, 0),
+            new Point2f(imgCropWidth, 0),
+            new Point2f(imgCropWidth, imgCropHeight),
+            new Point2f(0, imgCropHeight)
+        };
+
+        // Get the perspective transform matrix
+        Mat M = Cv2.GetPerspectiveTransform(points, ptsStd);
+
+        // Apply perspective warp
+        Mat dstImg = new Mat();
+        Cv2.WarpPerspective(img, dstImg, M, new Size(imgCropWidth, imgCropHeight), InterpolationFlags.Cubic, BorderTypes.Replicate);
+
+        // Rotate the image if the height/width ratio is greater than or equal to 1.5
+        if (dstImg.Height * 1.0 / dstImg.Width >= 1.5)
+        {
+            Cv2.Transpose(dstImg, dstImg);
+            Cv2.Flip(dstImg, dstImg, FlipMode.X);
+        }
+
+        return dstImg;
+    }
+
+    public static void TransformPoints(Point2f[] points, float width, float height, float destWidth, float destHeight)
+    {
+        for (int i = 0; i < points.Length; i++)
+        {
+            // Scale the coordinates
+            float newX = points[i].X / width * destWidth;
+            float newY = points[i].Y / height * destHeight;
+
+            // Clip the coordinates to the destination dimensions
+            newX = Math.Clamp((float)Math.Round(newX), 0, destWidth);
+            newY = Math.Clamp((float)Math.Round(newY), 0, destHeight);
+
+            // Update the point with new coordinates
+            points[i] = new Point2f(newX, newY);
+        }
+    }
+
+    public (Point2f[], float) GetMiniBoxes(Point[] contour)
+    {
+        // Convert Point[] to Point2f[]
+        Point2f[] contour2f = Array.ConvertAll(contour, p => new Point2f(p.X, p.Y));
+
+        // Compute the minimum area bounding box
+        RotatedRect boundingBox = Cv2.MinAreaRect(contour2f);
+
+        // Get the four corners of the bounding box
+        Point2f[] points = Cv2.BoxPoints(boundingBox).OrderBy(p => p.X).ToArray();
+
+        // Determine the index of the corners
+        int index1 = 0, index2 = 1, index3 = 2, index4 = 3;
+
+        if (points[1].Y > points[0].Y)
+        {
+            index1 = 0;
+            index4 = 1;
+        }
+        else
+        {
+            index1 = 1;
+            index4 = 0;
+        }
+
+        if (points[3].Y > points[2].Y)
+        {
+            index2 = 2;
+            index3 = 3;
+        }
+        else
+        {
+            index2 = 3;
+            index3 = 2;
+        }
+
+        // Arrange the points in the required order
+        Point2f[] box = new Point2f[] { points[index1], points[index2], points[index3], points[index4] };
+
+        // Return the points and the minimum side length of the bounding box
+        return (box, Math.Min(boundingBox.Size.Width, boundingBox.Size.Height));
+    }
+
+    public static Point2f[] ConvertToRectangle(Point2f[] points)
+    {
+        if (points.Length != 4)
+        {
+            throw new ArgumentException("Exactly four points are required.");
+        }
+
+        // Extract the points
+        Point2f p1 = points[0];
+        Point2f p2 = points[1];
+        Point2f p3 = points[2];
+        Point2f p4 = points[3];
+
+        // Find midpoints of opposite sides
+        Point2f midpoint1 = new Point2f((p1.X + p4.X) / 2, (p1.Y + p4.Y) / 2);
+        Point2f midpoint2 = new Point2f((p2.X + p3.X) / 2, (p2.Y + p3.Y) / 2);
+
+        // Calculate the angle of the side
+        double angle = Math.Atan2(p2.Y - p1.Y, p2.X - p1.X);
+
+        // Calculate the lengths of sides
+        double length1 = Distance(p1, p2);
+        double length2 = Distance(p2, p3);
+
+        // Create new rectangle points
+        Point2f newP1 = new Point2f(midpoint1.X - (float)(length1 / 2 * Math.Cos(angle)), midpoint1.Y - (float)(length1 / 2 * Math.Sin(angle)));
+        Point2f newP2 = new Point2f(midpoint1.X + (float)(length1 / 2 * Math.Cos(angle)), midpoint1.Y + (float)(length1 / 2 * Math.Sin(angle)));
+        Point2f newP3 = new Point2f(midpoint2.X + (float)(length2 / 2 * Math.Cos(angle + Math.PI / 2)), midpoint2.Y + (float)(length2 / 2 * Math.Sin(angle + Math.PI / 2)));
+        Point2f newP4 = new Point2f(midpoint2.X - (float)(length2 / 2 * Math.Cos(angle + Math.PI / 2)), midpoint2.Y - (float)(length2 / 2 * Math.Sin(angle + Math.PI / 2)));
+
+        return new Point2f[] { newP1, newP2, newP3, newP4 };
+    }
+
+    private static double Distance(Point2f p1, Point2f p2)
+    {
+        return Math.Sqrt(Math.Pow(p2.X - p1.X, 2) + Math.Pow(p2.Y - p1.Y, 2));
+    }
+
+    public (Point2f[], float) GetMiniBoxes(Point2f[] contour2f)
+    {
+        // Compute the minimum area bounding box
+        RotatedRect boundingBox = Cv2.MinAreaRect(contour2f);
+
+        // Get the four corners of the bounding box
+        Point2f[] points = Cv2.BoxPoints(boundingBox).OrderBy(p => p.X).ToArray();
+
+        // Determine the index of the corners
+        int index1 = 0, index2 = 1, index3 = 2, index4 = 3;
+
+        if (points[1].Y > points[0].Y)
+        {
+            index1 = 0;
+            index4 = 1;
+        }
+        else
+        {
+            index1 = 1;
+            index4 = 0;
+        }
+
+        if (points[3].Y > points[2].Y)
+        {
+            index2 = 2;
+            index3 = 3;
+        }
+        else
+        {
+            index2 = 3;
+            index3 = 2;
+        }
+
+        // Arrange the points in the required order
+        Point2f[] box = new Point2f[] { points[index1], points[index2], points[index3], points[index4] };
+
+        // Return the points and the minimum side length of the bounding box
+        return (box, Math.Min(boundingBox.Size.Width, boundingBox.Size.Height));
     }
 
     private static float GetScore(Point[] contour, Mat pred)
@@ -282,9 +771,62 @@ public class PaddleOcrDetector : IDisposable
         int longEdge = Math.Max(size.Width, size.Height);
         double scaleRate = 1.0 * maxSize.Value / longEdge;
 
-        return scaleRate < 1.0 ?
-            src.Resize(default, scaleRate, scaleRate) :
-            src.FastClone();
+        //return scaleRate < 1.0 ?
+        //    src.Resize(default, scaleRate, scaleRate) :
+        //    src.FastClone();
+
+        var resize_h =  scaleRate * size.Height;
+        var resize_w = scaleRate * size.Width;
+        double h32 = resize_h / 32;
+        double w32 = resize_w / 32;
+        resize_h = (int)(Math.Round(h32) * 32);
+        resize_w = (int)(Math.Round(w32) * 32);
+
+        if (scaleRate < 1.0)
+        {
+            Mat mat = new();
+            Cv2.Resize(src, mat, new Size(resize_w, resize_h));
+            return mat;
+        }
+        else
+            return src.FastClone(); // TODO: handle padding in case of >1 scale rate
+    }
+
+    public static Path64 MakePoly(Point2f[] box)
+    {
+        Path64 p = new Path64(box.Length);
+        for (int i = 0; i < box.Length; i++)
+            p.Add(new Point64(box[i].X, box[i].Y));
+        return p;
+    }
+
+    public static Point2f[] Unclip(Point2f[] box, float unclipRatio)
+    {
+        // Create a ClipperPath from the box points
+        var polyPath = MakePoly(box);
+        ClipperOffset offset = new ClipperOffset();
+
+        // Calculate the unclipping distance
+        double area = Clipper.Area(polyPath);
+        var rect = Clipper.GetBounds(polyPath);
+        double length = 2 * (rect.Width + rect.Height);
+        double distance = area * unclipRatio / length;
+
+        // Perform the offset
+        offset.AddPath(polyPath, JoinType.Round, EndType.Polygon);
+        var sln = new Paths64();
+        offset.Execute(distance, sln);
+
+        var expandedPoints = new List<Point2f>();
+        foreach (var p in sln)
+        {
+            foreach(var p2 in p)
+            {
+                expandedPoints.Add(new Point2f(p2.X, p2.Y));
+            }
+        }
+
+        return expandedPoints.ToArray();
     }
 
     private static Mat MatResize(Mat src, Size maxSize)
