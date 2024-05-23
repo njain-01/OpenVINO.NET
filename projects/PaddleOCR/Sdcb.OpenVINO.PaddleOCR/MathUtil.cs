@@ -1,4 +1,6 @@
-﻿namespace Sdcb.OpenVINO.PaddleOCR;
+﻿using System;
+
+namespace Sdcb.OpenVINO.PaddleOCR;
 
 internal static class MathUtil
 {
